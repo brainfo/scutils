@@ -15,6 +15,9 @@ import scipy.sparse as sp
 from typing import Dict
 import logging
 import os
+import zarr
+from anndata.experimental import read_dispatched, write_dispatched, read_elem
+from collections import defaultdict
 
 custom_params = {"axes.spines.right": False, "axes.spines.top": False}
 sns.set_theme(style="ticks", rc=custom_params)
@@ -155,8 +158,37 @@ def _fill_adata_slots_automatically(adata, d):
         except Exception:
             print('Unable to load data into AnnData: ', key, value, type(value))
 
-def anndata_from_matrix(matrix_folder):
-    return anndata.read_10x_mtx(matrix_folder)
+def anndata_from_matrix(matrix_folder, write=False):
+    raw_dict = defaultdict(lambda: "Not Present")
+    for root, sample_list, filenames in os.walk(f'{matrix_folder}'):
+        for sample_name in sample_list:
+            sample = sample_name.split("\.")[0]
+            raw_dict[sample] = sc.read_10x_mtx(f'{matrix_folder}/{sample_name}/')
+    ad_all = anndata.concat(list(raw_dict.values()), label='sample', keys=list(raw_dict.keys()), join='outer', index_unique='-', merge='same')
+    if write:
+        ad_all.write_zarr(f"{write}/raw.zarr")
+    return ad_all
+
+def read_dask(store):
+    f = zarr.open(store, mode="r")
+
+    def callback(func, elem_name: str, elem, iospec):
+        if iospec.encoding_type in (
+            "dataframe",
+            "csr_matrix",
+            "csc_matrix",
+            "awkward-array",
+        ):
+            # Preventing recursing inside of these types
+            return read_elem(elem)
+        elif iospec.encoding_type == "array":
+            return da.from_zarr(elem)
+        else:
+            return func(elem)
+
+    adata = read_dispatched(f, callback=callback)
+
+    return adata
 
 ## doublet
 def doublet_plot(basedir, sample_name, sample):
